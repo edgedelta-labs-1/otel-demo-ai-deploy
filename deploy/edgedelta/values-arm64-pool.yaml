@@ -1,0 +1,29 @@
+# Overrides for a shared cluster with a tainted ai-demo node group, applied after values.yaml.
+default:
+  # The ai-demo node group is tainted so only the demo runs there.
+  schedulingRules:
+    nodeSelector:
+      eks.amazonaws.com/nodegroup: ai-demo
+    tolerations:
+      - key: ai-demo
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+
+opentelemetry-collector:
+  nodeSelector:
+    eks.amazonaws.com/nodegroup: ai-demo
+  tolerations:
+    - key: ai-demo
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  # Keeps the ClusterRole name apart from other collectors in the cluster.
+  clusterRole:
+    name: otel-demo-collector
+    clusterRoleBinding:
+      name: otel-demo-collector
+  config:
+    exporters:
+      otlp_grpc/edgedelta:
+        endpoint: ed-data-supply-svc.ai-demo-edgedelta.svc.cluster.local:4317

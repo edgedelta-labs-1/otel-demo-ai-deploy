@@ -11,7 +11,7 @@ default:
 components:
   checkout:
     imageOverride:
-      repository: 788198741820.dkr.ecr.us-west-2.amazonaws.com/otel-demo-ai-deploy-checkout
+      repository: ghcr.io/edgedelta/otel-demo-ai-deploy-checkout
     envOverrides:
       - name: LAUNCHDARKLY_SDK_KEY
         valueFrom:
