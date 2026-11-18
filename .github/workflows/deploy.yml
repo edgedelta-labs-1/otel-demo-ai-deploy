@@ -20,7 +20,6 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: us-west-2
   IMAGE: ghcr.io/edgedelta/otel-demo-ai-deploy-checkout
   CHART_VERSION: 0.42.6
   DEPLOY_SHA: ${{ inputs.sha || github.sha }}
@@ -70,28 +69,23 @@ jobs:
   deploy:
     # The only job in the demo environment, so each run creates exactly one GitHub deployment.
     needs: build
-    runs-on: ubuntu-latest
+    # Runs inside the demo cluster, whose API is private; the runner's service account deploys the shop.
+    runs-on: otel-demo-deploy
     environment: demo
     timeout-minutes: 20
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: aws-actions/configure-aws-credentials@v6.3.0
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
+      - uses: azure/setup-helm@v5.0.1
+
+      - uses: azure/setup-kubectl@v5.1.0
 
       - name: Deploy
-        env:
-          EKS_CLUSTER: ${{ secrets.EKS_CLUSTER }}
         run: |
-          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION" >/dev/null
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm upgrade --install otel-demo open-telemetry/opentelemetry-demo \
             --version "$CHART_VERSION" -n otel-demo \
