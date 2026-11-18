@@ -11,7 +11,7 @@ default:
 components:
   checkout:
     imageOverride:
-      repository: ghcr.io/edgedelta/otel-demo-ai-deploy-checkout
+      repository: ghcr.io/edgedelta-labs-1/otel-demo-ai-deploy-checkout
     envOverrides:
       - name: LAUNCHDARKLY_SDK_KEY
         valueFrom:

@@ -15,7 +15,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/edgedelta/otel-demo-ai-deploy-checkout
+  IMAGE: ghcr.io/edgedelta-labs-1/otel-demo-ai-deploy-checkout
 
 jobs:
   build:

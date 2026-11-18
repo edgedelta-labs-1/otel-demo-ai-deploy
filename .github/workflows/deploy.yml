@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: ghcr.io/edgedelta/otel-demo-ai-deploy-checkout
+  IMAGE: ghcr.io/edgedelta-labs-1/otel-demo-ai-deploy-checkout
   CHART_VERSION: 0.42.6
   DEPLOY_SHA: ${{ inputs.sha || github.sha }}
 
