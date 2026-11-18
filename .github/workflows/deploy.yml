@@ -70,7 +70,8 @@ jobs:
   deploy:
     # The only job in the demo environment, so each run creates exactly one GitHub deployment.
     needs: build
-    runs-on: ubuntu-latest
+    # The cluster's API is private, so the deploy runs on a runner inside its network.
+    runs-on: [self-hosted, linux, x64, medium]
     environment: demo
     timeout-minutes: 20
     permissions:
@@ -86,6 +87,10 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
+
+      - uses: azure/setup-helm@v5.0.1
+
+      - uses: azure/setup-kubectl@v5.1.0
 
       - name: Deploy
         env:
