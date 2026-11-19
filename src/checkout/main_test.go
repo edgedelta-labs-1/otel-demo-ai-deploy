@@ -187,3 +187,51 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+func TestQuoteExpressShippingRetries(t *testing.T) {
+	prevLogger, prevTracer, prevSleep := logger, tracer, expressQuoteSleep
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { logger, tracer, expressQuoteSleep = prevLogger, prevTracer, prevSleep })
+
+	standard := &pb.Money{CurrencyCode: "USD", Units: 5}
+	tests := []struct {
+		desc       string
+		status     int
+		wantCalls  int
+		wantSleeps int
+		wantUnits  int64
+	}{
+		{desc: "first attempt succeeds", status: http.StatusOK, wantCalls: 1, wantSleeps: 0, wantUnits: 12},
+		{desc: "all attempts fail", status: http.StatusInternalServerError, wantCalls: expressQuoteAttempts, wantSleeps: expressQuoteAttempts - 1, wantUnits: 5},
+	}
+	for _, tc := range tests {
+		calls, sleeps := 0, 0
+		expressQuoteSleep = func(d time.Duration) {
+			if d != expressQuoteBackoff {
+				t.Errorf("%s: sleep = %v, want %v", tc.desc, d, expressQuoteBackoff)
+			}
+			sleeps++
+		}
+		cs := &checkout{
+			shippingSvcAddr: "http://shipping.test",
+			httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{
+					StatusCode: tc.status,
+					Body:       io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":12}}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			})},
+		}
+
+		got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, standard)
+		if calls != tc.wantCalls || sleeps != tc.wantSleeps {
+			t.Errorf("%s: calls = %d, sleeps = %d, want calls = %d, sleeps = %d", tc.desc, calls, sleeps, tc.wantCalls, tc.wantSleeps)
+		}
+		if got.GetUnits() != tc.wantUnits {
+			t.Errorf("%s: units = %d, want %d", tc.desc, got.GetUnits(), tc.wantUnits)
+		}
+	}
+}
