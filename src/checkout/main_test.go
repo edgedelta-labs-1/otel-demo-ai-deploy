@@ -19,9 +19,11 @@ import (
 	"github.com/launchdarkly/go-server-sdk/v7/testhelpers/ldtestdata"
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/open-telemetry/opentelemetry-demo/src/checkout/genproto/oteldemo"
 )
@@ -248,5 +250,106 @@ func TestExpressQuoteWaitRespectsContext(t *testing.T) {
 	}
 	if !expressQuoteWait(context.Background(), 0) {
 		t.Fatal("expressQuoteWait returned false for an elapsed timer")
+	}
+}
+
+type fakeCart struct {
+	pb.CartServiceClient
+	items []*pb.CartItem
+}
+
+func (f *fakeCart) GetCart(context.Context, *pb.GetCartRequest, ...grpc.CallOption) (*pb.Cart, error) {
+	return &pb.Cart{Items: f.items}, nil
+}
+
+type fakeCatalog struct{ pb.ProductCatalogServiceClient }
+
+func (fakeCatalog) GetProduct(_ context.Context, req *pb.GetProductRequest, _ ...grpc.CallOption) (*pb.Product, error) {
+	return &pb.Product{Id: req.GetId(), PriceUsd: &pb.Money{CurrencyCode: "USD", Units: 3}}, nil
+}
+
+type fakeCurrency struct{ pb.CurrencyServiceClient }
+
+func (fakeCurrency) Convert(_ context.Context, req *pb.CurrencyConversionRequest, _ ...grpc.CallOption) (*pb.Money, error) {
+	return req.GetFrom(), nil
+}
+
+type fakePayment struct {
+	pb.PaymentServiceClient
+	calls int
+}
+
+func (f *fakePayment) Charge(context.Context, *pb.ChargeRequest, ...grpc.CallOption) (*pb.ChargeResponse, error) {
+	f.calls++
+	return &pb.ChargeResponse{TransactionId: "tx"}, nil
+}
+
+func newShippingCounter(calls *int, bodies *[]string) *http.Client {
+	return &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		*calls++
+		b, _ := io.ReadAll(req.Body)
+		*bodies = append(*bodies, string(b))
+		body := `{"cost_usd":{"currency_code":"USD","units":9}}`
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+	})}
+}
+
+func TestPlaceOrderRejectsEmptyCartBeforeShippingAndPayment(t *testing.T) {
+	prevLogger, prevTracer := logger, tracer
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { logger, tracer = prevLogger, prevTracer })
+
+	for _, items := range [][]*pb.CartItem{nil, {}} {
+		shippingCalls := 0
+		var bodies []string
+		payment := &fakePayment{}
+		cs := &checkout{
+			shippingSvcAddr:         "http://shipping.test",
+			httpClient:              newShippingCounter(&shippingCalls, &bodies),
+			cartSvcClient:           &fakeCart{items: items},
+			productCatalogSvcClient: fakeCatalog{},
+			currencySvcClient:       fakeCurrency{},
+			paymentSvcClient:        payment,
+		}
+		_, err := cs.PlaceOrder(context.Background(), &pb.PlaceOrderRequest{UserId: "u1", UserCurrency: "USD", Address: &pb.Address{}})
+		if got := status.Code(err); got != codes.FailedPrecondition {
+			t.Errorf("items=%v: code = %v (%v), want FailedPrecondition", items, got, err)
+		}
+		if shippingCalls != 0 {
+			t.Errorf("items=%v: shipping calls = %d, want 0", items, shippingCalls)
+		}
+		if payment.calls != 0 {
+			t.Errorf("items=%v: payment calls = %d, want 0", items, payment.calls)
+		}
+	}
+}
+
+func TestPrepareOrderNonEmptyCartQuotesShipping(t *testing.T) {
+	prevTracer := tracer
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { tracer = prevTracer })
+
+	shippingCalls := 0
+	var bodies []string
+	cs := &checkout{
+		shippingSvcAddr:         "http://shipping.test",
+		httpClient:              newShippingCounter(&shippingCalls, &bodies),
+		cartSvcClient:           &fakeCart{items: []*pb.CartItem{{ProductId: "p1", Quantity: 2}}},
+		productCatalogSvcClient: fakeCatalog{},
+		currencySvcClient:       fakeCurrency{},
+	}
+	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(context.Background(), "u1", "USD", &pb.Address{})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if shippingCalls != 1 {
+		t.Fatalf("shipping calls = %d, want 1", shippingCalls)
+	}
+	if strings.Contains(bodies[0], `"items":null`) {
+		t.Errorf("shipping payload has null items: %s", bodies[0])
+	}
+	if len(prep.orderItems) != 1 || prep.shippingCostLocalized.GetUnits() != 9 {
+		t.Errorf("unexpected prep: items=%d shipping=%v", len(prep.orderItems), prep.shippingCostLocalized)
 	}
 }

@@ -393,6 +393,9 @@ func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (
 
 	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
+		if status.Code(err) == codes.FailedPrecondition {
+			return nil, err
+		}
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	span.AddEvent("prepared")
@@ -488,6 +491,9 @@ func (cs *checkout) prepareOrderItemsAndShippingQuoteFromCart(ctx context.Contex
 	cartItems, err := cs.getUserCart(ctx, userID)
 	if err != nil {
 		return out, fmt.Errorf("cart failure: %+v", err)
+	}
+	if len(cartItems) == 0 {
+		return out, status.Error(codes.FailedPrecondition, "cart is empty")
 	}
 	orderItems, err := cs.prepOrderItems(ctx, cartItems, userCurrency)
 	if err != nil {
