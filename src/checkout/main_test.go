@@ -187,3 +187,78 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+func TestQuoteExpressShippingReturnsFirstSuccessWithoutBackoff(t *testing.T) {
+	prevTracer := tracer
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { tracer = prevTracer })
+
+	calls := 0
+	cs := &checkout{
+		shippingSvcAddr: "http://shipping.test",
+		httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":12}}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})},
+	}
+	standard := &pb.Money{CurrencyCode: "USD", Units: 5}
+
+	start := time.Now()
+	got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, standard)
+	if elapsed := time.Since(start); elapsed >= expressQuoteBackoff {
+		t.Errorf("quoteExpressShipping took %v, want < %v on first success", elapsed, expressQuoteBackoff)
+	}
+	if calls != 1 {
+		t.Errorf("shipping quote calls = %d, want 1", calls)
+	}
+	if got.GetUnits() != 12 {
+		t.Errorf("quote units = %d, want 12", got.GetUnits())
+	}
+}
+
+func TestQuoteExpressShippingFallsBackToStandardOnFailure(t *testing.T) {
+	prevLogger, prevTracer := logger, tracer
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { logger, tracer = prevLogger, prevTracer })
+
+	calls := 0
+	cs := &checkout{
+		shippingSvcAddr: "http://shipping.test",
+		httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			return nil, fmt.Errorf("unavailable")
+		})},
+	}
+	standard := &pb.Money{CurrencyCode: "USD", Units: 5}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	got := cs.quoteExpressShipping(ctx, &pb.Address{}, nil, standard)
+	if elapsed := time.Since(start); elapsed >= expressQuoteBackoff {
+		t.Errorf("quoteExpressShipping took %v with cancelled ctx, want < %v", elapsed, expressQuoteBackoff)
+	}
+	if got != standard {
+		t.Errorf("quote = %v, want standard fallback", got)
+	}
+	if calls != 1 {
+		t.Errorf("shipping quote calls = %d, want 1 after ctx cancellation", calls)
+	}
+}
+
+func TestExpressQuoteWait(t *testing.T) {
+	if !expressQuoteWait(context.Background(), time.Millisecond) {
+		t.Error("expressQuoteWait returned false for live context")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if expressQuoteWait(ctx, time.Hour) {
+		t.Error("expressQuoteWait returned true for cancelled context")
+	}
+}
