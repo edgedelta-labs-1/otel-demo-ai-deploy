@@ -87,6 +87,18 @@ const (
 	expressQuoteBackoff  = 500 * time.Millisecond
 )
 
+// expressQuoteWait waits d between failed express quote attempts; it returns false if ctx ends first.
+var expressQuoteWait = func(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
 // ldContext is the LaunchDarkly evaluation context for this service.
 var ldContext = ldcontext.New("checkout")
 
@@ -516,17 +528,17 @@ func (cs *checkout) quoteExpressShipping(ctx context.Context, address *pb.Addres
 	ctx, span := tracer.Start(ctx, "quoteExpressShipping")
 	defer span.End()
 
-	quote := standard
 	for attempt := 1; attempt <= expressQuoteAttempts; attempt++ {
 		q, err := cs.quoteShipping(ctx, address, items)
-		if err != nil {
-			logger.Warn("express shipping quote failed", slog.Int("attempt", attempt), slog.Any("error", err))
-		} else {
-			quote = q
+		if err == nil {
+			return q
 		}
-		time.Sleep(expressQuoteBackoff)
+		logger.Warn("express shipping quote failed", slog.Int("attempt", attempt), slog.Any("error", err))
+		if attempt == expressQuoteAttempts || !expressQuoteWait(ctx, expressQuoteBackoff) {
+			break
+		}
 	}
-	return quote
+	return standard
 }
 
 func mustCreateClient(svcAddr string) *grpc.ClientConn {
