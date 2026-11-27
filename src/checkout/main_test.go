@@ -187,3 +187,51 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+func TestQuoteExpressShippingReturnsOnFirstSuccess(t *testing.T) {
+	prevLogger, prevTracer := logger, tracer
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { logger, tracer = prevLogger, prevTracer })
+
+	newCheckout := func(failures int, calls *int) *checkout {
+		return &checkout{
+			shippingSvcAddr: "http://shipping.test",
+			httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				*calls++
+				if *calls <= failures {
+					return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header), Request: req}, nil
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":12}}`)), Header: make(http.Header), Request: req}, nil
+			})},
+		}
+	}
+	standard := &pb.Money{CurrencyCode: "USD", Units: 5}
+
+	tests := []struct {
+		desc      string
+		failures  int
+		wantCalls int
+		wantUnits int64
+		wantSleep time.Duration
+	}{
+		{desc: "first attempt succeeds", failures: 0, wantCalls: 1, wantUnits: 12, wantSleep: 0},
+		{desc: "one failure then success", failures: 1, wantCalls: 2, wantUnits: 12, wantSleep: expressQuoteBackoff},
+		{desc: "all attempts fail", failures: expressQuoteAttempts, wantCalls: expressQuoteAttempts, wantUnits: 5, wantSleep: time.Duration(expressQuoteAttempts-1) * expressQuoteBackoff},
+	}
+	for _, tc := range tests {
+		calls := 0
+		start := time.Now()
+		got := newCheckout(tc.failures, &calls).quoteExpressShipping(context.Background(), &pb.Address{}, nil, standard)
+		elapsed := time.Since(start)
+		if calls != tc.wantCalls {
+			t.Errorf("%s: shipping calls = %d, want %d", tc.desc, calls, tc.wantCalls)
+		}
+		if got.GetUnits() != tc.wantUnits {
+			t.Errorf("%s: quote units = %d, want %d", tc.desc, got.GetUnits(), tc.wantUnits)
+		}
+		if elapsed < tc.wantSleep || elapsed > tc.wantSleep+expressQuoteBackoff/2 {
+			t.Errorf("%s: elapsed = %v, want about %v", tc.desc, elapsed, tc.wantSleep)
+		}
+	}
+}
